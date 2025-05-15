@@ -1,0 +1,122 @@
+//Noel Johnbosco 
+//5/14/2025
+
+
+//Payload Abstracted Overview 
+
+/*
+  Must power on, beep battery voltage, and beep a standby armed-and-ready mode
+  Must be able to receive GPS information and transmit it to your ground station (there will be a separate ground station for the payload)
+  Must be able to detect a successful nose cone separation (light sensor)
+  This is when the camera starts recording
+  Must be able to control the separation from the tether (pyro output to tender descender) [altitude based]
+  Must be able to control the deployment of the parachute (pyro output to line cutter) [altitude based]
+*/
+
+
+
+//Soar_24_25 Payload Computer Software
+#include <Wire.h>
+#include <RadioLib.h>
+#include <SparkFun_u-blox_GNSS_v3.h>
+
+
+
+//Ground Station Pin def
+#define GPS_TX 0
+#define GPS_RX 1
+#define LORA_RESET 3
+#define BUZ 5
+#define TX_CAM 7
+#define RX_CAM 8
+#define LORA_BUSY 9
+#define LORA_CS 10
+#define LORA_MISO 12
+#define LORA_MOSI 11
+#define LORA_DIO1 24
+#define CURRENT_SENSE 26
+#define LIGHT_SENSER 27
+#define SOLENOID1 23
+#define SOLENOID2 22
+#define PAYLOAD_STATE 20
+#define CONT2 15
+#define CONT1 14
+
+//GPS serial
+#define mySerial Serial1 
+
+
+//LoRa def
+SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RESET, LORA_BUSY);
+
+
+//GPS def
+SFE_UBLOX_GNSS_SERIAL myGNSS;
+
+
+
+//Piezo Buzzer PWM Timer Setup
+TIM_TypeDef *Instance = (TIM_TypeDef *)pinmap_peripheral(digitalPinToPinName(BUZ), PinMap_PWM);
+uint32_t channel = STM_PIN_CHANNEL(pinmap_function(digitalPinToPinName(BUZ), PinMap_PWM));
+HardwareTimer *MyTim = new HardwareTimer(Instance);
+
+//GNSS Values
+unsigned long lastGNSS = 0;                    
+long latitude = 0;
+long longitude = 0;
+long gnssAltitude = 0;
+byte SIV = 0;
+
+
+void pvtCallback(UBX_NAV_PVT_data_t* dataStruct) {
+  // This gets called whenever new PVT data is received
+  latitude = dataStruct->lat;
+  longitude = dataStruct->lon;
+  SIV = dataStruct->numSV;
+}
+
+
+void setFlag(void) {
+    receivedFlag = true;
+}
+
+void setup() 
+{
+  Serial.begin(9600);
+  mySerial.begin(38400); 
+  while (myGNSS.begin(mySerial) == false) //Connect to the u-blox module using mySerial (defined above)
+  {
+    Serial.println(F("u-blox GNSS not detected. Retrying..."));
+    delay (1000);
+  }
+
+  myGNSS.setUART1Output(COM_TYPE_UBX);
+  
+  // Set up auto PVT message (non-blocking)
+  myGNSS.setNavigationFrequency(1); // 1 Hz
+  myGNSS.setAutoPVT(true); // Enable automatic NAV PVT messages
+  myGNSS.setAutoPVTcallbackPtr(&pvtCallback); // Register callback function
+
+
+
+
+}
+
+void loop() 
+{
+  //GNSS CHECK
+  myGNSS.checkUblox();
+  myGNSS.checkCallbacks();
+  Serial.print(F("Lat: "));
+  Serial.print(latitude);
+
+  Serial.print(F(" Long: "));
+  Serial.print(longitude);
+  Serial.print(F(" (degrees * 10^-7)"));
+
+  Serial.print(F(" Alt: "));
+  Serial.print(altitude);
+  Serial.print(F(" (mm)"));
+
+  Serial.println();
+}
