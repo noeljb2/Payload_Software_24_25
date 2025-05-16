@@ -75,7 +75,8 @@ uint sampleIndex = 0;
 volatile float pressureSum = 0.0;
 volatile float movingAverage = 0.0;
 float baselinePressure = 0.0;                      
-
+unsigned long trendStartTime = 0;
+float trendStartAltitude = 0.0;
 
 // Time variables
 const unsigned long baroInterval = 50000;      // 50000us interval for MS5611
@@ -86,29 +87,81 @@ unsigned long lastBaroTime = 0;
 float lastAltitude = 0.0;
 float currentAltitude = 0.0;
 
-
-
-
-
-
-void baroIRQ(void){
-  baroReady = true;
-}
-
-
-
+MS5611 ms5611(0x77);
 
 void setup() 
 {
   Serial.begin(9600);
-  
+  Wire.begin();
+
+  if (!ms5611.begin()) {
+    Serial.println("MS5611 not found or failed to initialize!");
+    while (1);
+  }
+
+  ms5611.setOversampling(OSR_ULTRA_HIGH); // Best resolution, ~9ms conversion time
+
+  //second order temperature compensation
+  ms5611.setCompensation(true);
 
 
-
-
+  trendStartTime = micros();
 }
+
+
+
 
 void loop() 
 {
-  
+  static unsigned long lastBaroMillis = 0;
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - lastBaroMillis >= 100) { // 100 ms non-blocking delay
+    lastBaroMillis = currentMillis;
+
+    int status = ms5611.read();
+    if (status == MS5611_READ_OK) {
+      float temperature = ms5611.getTemperature();     // in °C
+      float pressure = ms5611.getPressure();           // in mbar (hPa)
+
+      // Update moving average buffer
+      pressureSum -= pressureSamples[sampleIndex];
+      pressureSamples[sampleIndex] = realPressure;
+      pressureSum += realPressure;
+      sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
+
+      movingAverage = pressureSum / NUM_SAMPLES;
+
+      // Set baseline after buffer is filled
+      if (!barBaselineSet && sampleIndex == 0) {
+          baselinePressure = movingAverage;
+          barBaselineSet = true;
+          Serial.println("Baseline pressure set.");
+      }
+      // Compute altitude and barometric velocity
+      if (barBaselineSet) {
+          currentAltitude = 44330.0 * (1.0 - pow(movingAverage / baselinePressure, 0.1903));
+
+          unsigned long currentTime = micros();
+          if ((currentTime - trendStartTime) >= 10000) {  //0.01s calculations
+            float deltaAltitude = currentAltitude - trendStartAltitude;
+            float deltaTime = (currentTime - trendStartTime) / 1.0e6;
+            baroVelocity = deltaAltitude / deltaTime;
+
+            trendStartAltitude = currentAltitude;
+            trendStartTime = currentTime;
+          }
+
+          Serial.print("Temp: ");
+          Serial.print(realTemperature);
+          Serial.print(" °C, Pressure: ");
+          Serial.print(realPressure);
+          Serial.print(" mBar, Altitude: ");
+          Serial.print(currentAltitude);
+          Serial.print(" m, Velocity: ");
+          Serial.print(baroVelocity);
+          Serial.println(" m/s");
+      }
+    }
+  }
 }
