@@ -136,6 +136,9 @@ void setup()
     while(1);
   }
 
+
+
+  //BATTERY VOLTAGE BEEP CHECK
   float batteryVoltage = 3.3 * (analogRead(VOLT_Check) / 1023.0);
 
   if(batteryVoltage > 0.130 && batteryVoltage < 0.180) // voltage divider should read: 0.176 V for the volt check analog read, SO a range is set
@@ -171,4 +174,13 @@ void setup()
     delay(50);
     while(1);
   }
+
+  
+
+
+
+
+
+
+
 }
