@@ -145,7 +145,7 @@ void setup()
   {
     Serial.println("Battery Voltage is good");
     // Store each decimal digit of batteryVoltage into an int array
-    int digits[6]; // Enough for e.g. "0.1760"
+    int digits[6]; 
     int temp = (int)(batteryVoltage * 10000); // Shift 4 decimal places
     for (int i = 0; i < 6; i++) {
       digits[5 - i] = temp % 10;
