@@ -13,7 +13,7 @@
   Must be able to control the deployment of the parachute (pyro output to line cutter) [altitude based]
 */
 
-
+//take average levels of light sensor data to set a baseline. 
 
 //Soar_24_25 Payload Computer Software
 #include <Wire.h>
@@ -62,11 +62,7 @@ int LORA_PREAMBLE_LENGTH = 8; //8 bytes
 
 //GPS def
 SFE_UBLOX_GNSS_SERIAL myGNSS;
-
-//Piezo Buzzer PWM Timer Setup
-TIM_TypeDef *Instance = (TIM_TypeDef *)pinmap_peripheral(digitalPinToPinName(BUZ), PinMap_PWM);
-uint32_t channel = STM_PIN_CHANNEL(pinmap_function(digitalPinToPinName(BUZ), PinMap_PWM));
-HardwareTimer *MyTim = new HardwareTimer(Instance);
+//set gps higher acceleration threshold find in library  ******
 
 //GNSS Values
 unsigned long lastGNSS = 0;                    
@@ -76,18 +72,45 @@ long gnssAltitude = 0;
 byte SIV = 0;
 
 
-/* Set the delay between fresh samples */
-uint16_t BNO055_SAMPLERATE_DELAY_MS = 100;  //100HZ 
-
-
 //MS5611 def
-MS5611 ms5611(0x77);
+MS5611 ms5611(0x77,&Wire1);
+
+
+
+//
+
+
+
+//Higher Level 
+
+
+
+
+
+
+
+
+//Flight states 
+
+bool DetectAppogee = false;  //this will be used for backup if Light detection wont work *******
+bool DetectNoseConeSeperation = false; 
+bool TetherSeperation = false;
+bool MainParachute = false; 
+
+
+
+
+
+
+
 
 
 void setup()
 {
   Serial.begin(9600);
-  Wire.begin();
+
+  //Gnss i2C Initialization
+  Wire1.begin();
 
   pinMode(BUZ, OUTPUT);
   pinMode(CONT1, INPUT);
@@ -111,14 +134,27 @@ void setup()
 
 
   //GPS Initialization
-  mySerial.begin(9600);
-  myGNSS.setUART1Output(COM_TYPE_UBX);
+  do {
+    Serial.println("GNSS: trying 38400 baud");
+    mySerial.begin(38400);
+    if (myGNSS.begin(mySerial) == true) break;
+    delay(100);
+    Serial.println("GNSS: trying 9600 baud");
+    mySerial.begin(9600);
+    if (myGNSS.begin(mySerial) == true) {
+        Serial.println("GNSS: connected at 9600 baud, switching to 38400");
+        myGNSS.setSerialRate(38400);
+        delay(100);
+    } else {
+        //myGNSS.factoryDefault();
+        delay(2000); //Wait a bit before trying again to limit the Serial output
+    }
+  } while(1);
+  Serial.println("GNSS serial connected");
+  myGNSS.setUART1Output(COM_TYPE_UBX); //Set the UART port to output UBX only
+  //myGNSS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
+  myGNSS.saveConfiguration(); //Save the current settings to flash and BBR
   
-  // Set up auto PVT message (non-blocking)
-  myGNSS.setNavigationFrequency(1); // 1 Hz
-  myGNSS.setAutoPVT(true); // Enable automatic NAV PVT messages
-  myGNSS.setAutoPVTcallbackPtr(&pvtCallback); // Register callback function
-
 
   //beeping battery voltage 
 
