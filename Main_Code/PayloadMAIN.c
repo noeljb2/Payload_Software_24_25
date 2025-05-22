@@ -244,6 +244,7 @@ void loop()
 
 
   if (currentMicros - lastLoopTime >= loopInterval) //sets a loop rate so this is set at 500 ms 
+  {
     lastLoopTime = currentMicros;
 
     ms5611.read();
@@ -268,4 +269,12 @@ void loop()
     radio.transmit(data);
 
 
+
+
+
+
+
+    // ---State Machine----
+  }
+  
 }
