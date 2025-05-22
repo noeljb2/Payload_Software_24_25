@@ -14,9 +14,6 @@
 */
 
 
-
-
-
 //  Soar_24_25 Payload Computer Software
 #include <Wire.h>
 #include <RadioLib.h>
@@ -77,13 +74,16 @@ byte SIV = 0;
 //  MS5611 def w moving avg def
 MS5611 ms5611(0x77,&Wire1);
 float groundPressure = 0.0; //baseline pressure
+float groundAltitude = 0.0; 
 float altitude = 0.0 //raise warning if altitude is 0
 
 #define PRESSURE_AVG_SIZE 30
 float pressureBuffer[PRESSURE_AVG_SIZE];
 int pressureIndex = 0;
 bool pressureBufferFilled = false;
-
+volatile double pressureSum = 0.0;
+volatile double movingAverage = 0.0;
+double baselinePressure = 0.0;
 
 //  Light sensor Basline 
 float LightVoltage = 0.0;
@@ -103,8 +103,16 @@ unsigned long lastBeepTime = 0;
 unsigned long lastLoopTime = 0;
 const unsigned long loopInterval = 500000; // 500 ms change this to increase or decrease loop cycle
 
+// flag to indicate that a packet was sent
+volatile bool transmittedFlag = false;
 
+// save transmission state between loops
+volatile int transmissionState = RADIOLIB_ERR_NONE;
 
+void setFlag(void) {
+  // we sent a packet, set the flag
+  transmittedFlag = true;
+}
 
 void beepDigit(int count) {
   for (int i = 0; i < count; i++) {
@@ -154,12 +162,13 @@ void setup()
     Serial.println("MS5611 not found or failed to initialize!");
     while (1);
   }
+  ms5611.setOversampling(OSR_ULTRA_HIGH);
   ms5611.read();
-  groundPressure = ms5611.getPressure();
-  MS5611.setOversampling(OSR_ULTRA_HIGH);
+  groundPressure = ms5611.getPressurePascal();
+  groundAltitude = 44330.0 * (1.0 - pow(filteredPressure / 101325.0, 0.1903));
 
   // --------LoRa Initialization----
-  radio.begin(Lora_Frequency, LORA_BANDWIDTH, LORA_SPREADING_FACTOR, LORA_CODING_RATE, LORA_SYNC_WORD, LORA_POWER, LORA_PREAMBLE_LENGTH);
+  int state = radio.begin(Lora_Frequency, LORA_BANDWIDTH, LORA_SPREADING_FACTOR, LORA_CODING_RATE, LORA_SYNC_WORD, LORA_POWER, LORA_PREAMBLE_LENGTH);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -171,6 +180,9 @@ void setup()
   radio.setCurrentLimit(140);
   radio.setPacketSentAction(setFlag);
 
+  for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
+    pressureSamples[i] = 0.0;
+  }
 
   // ----GPS Initialization------
   unsigned long gnssStart = millis();
@@ -249,16 +261,14 @@ void loop()
 
     ms5611.read();
     float rawPressure = ms5611.getPressurePascal();
-    pressureBuffer[pressureIndex] = rawPressure;
+    pressureSum -= pressureSamples[pressureIndex];
+    pressureSamples[pressureIndex] = rawPressure;
+    pressureSum += rawPressure;
     pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE;
-    if (pressureIndex == 0) pressureBufferFilled = true;
 
-    float sum = 0;
-    int count = pressureBufferFilled ? PRESSURE_AVG_SIZE : pressureIndex;
-    for (int i = 0; i < count; i++) sum += pressureBuffer[i];
-    float filteredPressure = sum / count;
+    movingAverage = pressureSum / PRESSURE_AVG_SIZE;
 
-    altitude = 44330.0 * (1.0 - pow(filteredPressure / 101325.0, 0.1903));
+    altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
 
     latitude = myGNSS.getLatitude();
     longitude = myGNSS.getLongitude();
@@ -268,13 +278,30 @@ void loop()
     String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
     radio.transmit(data);
 
-
-
-
-
+    int lightLevel = analogRead(LIGHT_SENSOR);
 
 
     // ---State Machine----
+    if (!NoseConeSeparated && lightLevel > baseline + 300) { //tune this numeber 
+      NoseConeSeparated = true;
+      digitalWrite(TX_CAM, HIGH); //what ever the intialization for camera is **********************
+    }
+    if (!TetherReleased && altitude > 200) { //set altitude at a height 
+      TetherReleased = true;
+      digitalWrite(SOLENOID1, HIGH);
+      unsigned long fireStart = micros();
+      while (micros() - fireStart < 1000000);
+      digitalWrite(SOLENOID1, LOW);
+    }
+    if (!ParachuteDeployed && TetherReleased && altitude < 100) { //parachute deployed at 100m atm...****?
+      ParachuteDeployed = true;
+      digitalWrite(SOLENOID2, HIGH);
+      unsigned long fireStart = micros();
+      while (micros() - fireStart < 1000000); //waiting for the ematch or co2 to be fully deployed? ********
+      digitalWrite(SOLENOID2, LOW);
+    }
+
+
   }
   
 }
