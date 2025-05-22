@@ -2,7 +2,7 @@
 //5/14/2025
 
 
-//Payload Abstracted Overview 
+//  Payload Abstracted Overview 
 
 /*
   Must power on, beep battery voltage, and beep a standby armed-and-ready mode
@@ -13,16 +13,18 @@
   Must be able to control the deployment of the parachute (pyro output to line cutter) [altitude based]
 */
 
-//take average levels of light sensor data to set a baseline. 
 
-//Soar_24_25 Payload Computer Software
+
+
+
+//  Soar_24_25 Payload Computer Software
 #include <Wire.h>
 #include <RadioLib.h>
 #include <SparkFun_u-blox_GNSS_v3.h>
-#include <MS5611.h> // Include the MS5611 library
+#include <MS5611.h> 
 
 
-//Ground Station Pin def
+//  Ground Station Pin def
 #define GPS_TX 0
 #define GPS_RX 1
 #define LORA_RESET 3
@@ -43,11 +45,11 @@
 #define CONT2 15
 #define CONT1 14
 
-//GPS serial
+//  GPS serial
 #define mySerial Serial1 
 
 
-//LoRa def
+//  LoRa def
 SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RESET, LORA_BUSY);
 
 float Lora_Frequency = 915.0; //915MHz
@@ -60,11 +62,11 @@ int LORA_PREAMBLE_LENGTH = 8; //8 bytes
 
 
 
-//GPS def
+//  GPS def
 SFE_UBLOX_GNSS_SERIAL myGNSS;
 //set gps higher acceleration threshold find in library  ******
 
-//GNSS Values
+//  GNSS Values
 unsigned long lastGNSS = 0;                    
 long latitude = 0;
 long longitude = 0;
@@ -72,44 +74,54 @@ long gnssAltitude = 0;
 byte SIV = 0;
 
 
-//MS5611 def
+//  MS5611 def w moving avg def
 MS5611 ms5611(0x77,&Wire1);
+float groundPressure = 0.0; //baseline pressure
+float altitude = 0.0 //raise warning if altitude is 0
+
+#define PRESSURE_AVG_SIZE 30
+float pressureBuffer[PRESSURE_AVG_SIZE];
+int pressureIndex = 0;
+bool pressureBufferFilled = false;
 
 
-
-//
-
-
-
-//Higher Level 
+//  Light sensor Basline 
+float LightVoltage = 0.0;
 
 
+//  Flight states 
 
-
-
-
-
-
-//Flight states 
-
-bool DetectAppogee = false;  //this will be used for backup if Light detection wont work *******
-bool DetectNoseConeSeperation = false; 
+bool DetectAppogee = false;  
+bool DetectNoseConeSeperation = false; //based on light sensor 
 bool TetherSeperation = false;
 bool MainParachute = false; 
 
 
+// Timing Variables 
+unsigned long currentMicros;
+unsigned long lastBeepTime = 0;
+unsigned long lastLoopTime = 0;
+const unsigned long loopInterval = 500000; // 500 ms change this to increase or decrease loop cycle
 
 
 
 
+void beepDigit(int count) {
+  for (int i = 0; i < count; i++) {
+    tone(BUZ, 4000); delay(1000);
+    noTone(BUZ); delay(1000);
+  }
+}
 
+void errorCode()
+{
+  //some buz and a while to stop the code
 
+}
 
 void setup()
 {
   Serial.begin(9600);
-
-  //Gnss i2C Initialization
   Wire1.begin();
 
   pinMode(BUZ, OUTPUT);
@@ -121,19 +133,47 @@ void setup()
   pinMode(SOLENOID2, OUTPUT);
   pinMode(VOLT_Check, INPUT);
 
-  //Baro Sensor Initialization
+
+  // ----Cont Check-----
+  if(!(analogRead(CONT1) >= 500)){
+    Serial.println(analogRead(CONT1));
+    Serial.println("No cont1");
+    errorCode();
+  }
+  if(!(analogRead(CONT2) >= 500)){
+    Serial.println(analogRead(CONT2));
+    Serial.println("No cont2");
+    errorCode();
+  }
+
+
+
+  // -------Baro Sensor Initialization-----
   if (!ms5611.begin()) 
   {
     Serial.println("MS5611 not found or failed to initialize!");
     while (1);
   }
+  ms5611.read();
+  groundPressure = ms5611.getPressure();
+  MS5611.setOversampling(OSR_ULTRA_HIGH);
 
-  //LoRa Initialization
+  // --------LoRa Initialization----
   radio.begin(Lora_Frequency, LORA_BANDWIDTH, LORA_SPREADING_FACTOR, LORA_CODING_RATE, LORA_SYNC_WORD, LORA_POWER, LORA_PREAMBLE_LENGTH);
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println(F("success!"));
+  } else {
+    Serial.print(F("failed, code "));
+    Serial.println(state);
+    while (true) { delay(10); }
+  }
+
+  radio.setCurrentLimit(140);
+  radio.setPacketSentAction(setFlag);
 
 
-
-  //GPS Initialization
+  // ----GPS Initialization------
+  unsigned long gnssStart = millis();
   do {
     Serial.println("GNSS: trying 38400 baud");
     mySerial.begin(38400);
@@ -149,74 +189,83 @@ void setup()
         //myGNSS.factoryDefault();
         delay(2000); //Wait a bit before trying again to limit the Serial output
     }
+    if(millis() - gnssStart >= 10000){
+      errorCode1();
+    }
   } while(1);
   Serial.println("GNSS serial connected");
   myGNSS.setUART1Output(COM_TYPE_UBX); //Set the UART port to output UBX only
-  //myGNSS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
+  myGNSS.setI2COutput(COM_TYPE_UBX); //Set the I2C port to output UBX only (turn off NMEA noise)
   myGNSS.saveConfiguration(); //Save the current settings to flash and BBR
   
 
-  //beeping battery voltage 
-
-  if(voltage > 0.130 && voltage < 0.180) // voltage divider should read: 0.176 V for the volt check analog read, SO a range is set
-  {
-    Serial.println("Battery Voltage is good");
-  }
-  else
-  {
-    Serial.println("Battery Voltage is bad");
-    MyTim->setPWM(channel, BUZ, 4000, 0); // 4kHz , 0% dutycycle
-    delay(50);
-    MyTim->setPWM(channel, BUZ, 4000, 50); // 4kHz, 10% dutycycle
-    delay(50);
-    while(1);
-  }
+  //***** SET UP NON BLOCKING for this module
 
 
 
-  //BATTERY VOLTAGE BEEP CHECK
-  float batteryVoltage = 3.3 * (analogRead(VOLT_Check) / 1023.0);
+  // -----Voltage beep----------
+  float adcvoltage = analogRead(VOLT_Check);
+  Serial.println(adcvoltage);
+  float voltage = 5.096 * 3.3 * (adcvoltage / 4095.0);  //5.096 is the voltage divider factor 
+  Serial.println(voltage/5.096);
+  Serial.print(voltage);
 
-  if(batteryVoltage > 0.130 && batteryVoltage < 0.180) // voltage divider should read: 0.176 V for the volt check analog read, SO a range is set
-  {
-    Serial.println("Battery Voltage is good");
-    // Store each decimal digit of batteryVoltage into an int array
-    int digits[6]; 
-    int temp = (int)(batteryVoltage * 10000); // Shift 4 decimal places
-    for (int i = 0; i < 6; i++) {
-      digits[5 - i] = temp % 10;
-      temp /= 10;
-    }
-
-    //Buzzes the battery voltage 
-    for(int j=0;j<digits.length;j++)
-    {
-      for (int i=0; i<digits[j]; i++)
-      {
-        MyTim->setPWM(channel, BUZ, 4000, 50); // 4kHz, 10% dutycycle
-        delay(50);
-        MyTim->setPWM(channel, BUZ, 4000, 0); // 4kHz , 0% dutycycle
-        delay(100);
-      }
-    }
-    
-  }
-  else
-  {
-    Serial.println("Battery Voltage is bad");
-    MyTim->setPWM(channel, BUZ, 4000, 0); // 4kHz , 0% dutycycle
-    delay(50);
-    MyTim->setPWM(channel, BUZ, 4000, 50); // 4kHz, 10% dutycycle
-    delay(50);
-    while(1);
-  }
+  int voltageInt = (int)round(voltage * 100); 
+  int hundreds = voltageInt / 100;     
+  Serial.println(hundreds);   
+  int tens = (voltageInt / 10) % 10;     
+  int ones = voltageInt % 10;           
+  
+  beepDigit(hundreds+1);
+  delay(2000);  // pause between parts
+  beepDigit(tens);
+  delay(2000);
+  beepDigit(ones);
 
   
+  // -------light Sensor Calibration----
+
+  //essentially polls light sensor data to set a baseline for the payload inside rocket
 
 
 
 
 
+  
+}
+
+
+//            ****  LOOP  ****
+
+
+void loop()
+{
+  currentMicros = micros();
+
+
+  if (currentMicros - lastLoopTime >= loopInterval) //sets a loop rate so this is set at 500 ms 
+    lastLoopTime = currentMicros;
+
+    ms5611.read();
+    float rawPressure = ms5611.getPressurePascal();
+    pressureBuffer[pressureIndex] = rawPressure;
+    pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE;
+    if (pressureIndex == 0) pressureBufferFilled = true;
+
+    float sum = 0;
+    int count = pressureBufferFilled ? PRESSURE_AVG_SIZE : pressureIndex;
+    for (int i = 0; i < count; i++) sum += pressureBuffer[i];
+    float filteredPressure = sum / count;
+
+    altitude = 44330.0 * (1.0 - pow(filteredPressure / 101325.0, 0.1903));
+
+    latitude = myGNSS.getLatitude();
+    longitude = myGNSS.getLongitude();
+    gnssAltitude = myGNSS.getaltitude();  //optional? 
+    SIV = myGNSS.getSIV(); //probably optional ****
+ 
+    String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
+    radio.transmit(data);
 
 
 }
