@@ -20,6 +20,7 @@
 #include <SparkFun_u-blox_GNSS_v3.h>
 #include <MS5611.h> 
 
+#include "MS5611_NonBlocking.h"
 
 //  Ground Station Pin def
 #define GPS_TX 0
@@ -115,7 +116,8 @@ void setFlag(void) {
 }
 
 void beepDigit(int count) {
-  for (int i = 0; i < count; i++) {
+  for (int i = 0; i < count; i++) 
+  {
     tone(BUZ, 4000); delay(1000);
     noTone(BUZ); delay(1000);
   }
@@ -165,7 +167,7 @@ void setup()
   ms5611.setOversampling(OSR_ULTRA_HIGH);
   ms5611.read();
   groundPressure = ms5611.getPressurePascal();
-  groundAltitude = 44330.0 * (1.0 - pow(filteredPressure / 101325.0, 0.1903));
+  groundAltitude = 44330.0 * (1.0 - pow(groundPressure / 101325.0, 0.1903));
 
   // --------LoRa Initialization----
   int state = radio.begin(Lora_Frequency, LORA_BANDWIDTH, LORA_SPREADING_FACTOR, LORA_CODING_RATE, LORA_SYNC_WORD, LORA_POWER, LORA_PREAMBLE_LENGTH);
@@ -279,29 +281,71 @@ void loop()
     radio.transmit(data);
 
     int lightLevel = analogRead(LIGHT_SENSOR);
-
-
-    // ---State Machine----
-    if (!NoseConeSeparated && lightLevel > baseline + 300) { //tune this numeber 
-      NoseConeSeparated = true;
-      digitalWrite(TX_CAM, HIGH); //what ever the intialization for camera is **********************
-    }
-    if (!TetherReleased && altitude > 200) { //set altitude at a height 
-      TetherReleased = true;
-      digitalWrite(SOLENOID1, HIGH);
-      unsigned long fireStart = micros();
-      while (micros() - fireStart < 1000000);
-      digitalWrite(SOLENOID1, LOW);
-    }
-    if (!ParachuteDeployed && TetherReleased && altitude < 100) { //parachute deployed at 100m atm...****?
-      ParachuteDeployed = true;
-      digitalWrite(SOLENOID2, HIGH);
-      unsigned long fireStart = micros();
-      while (micros() - fireStart < 1000000); //waiting for the ematch or co2 to be fully deployed? ********
-      digitalWrite(SOLENOID2, LOW);
-    }
-
-
   }
+
+  // ---State Machine----
+  if (!NoseConeSeparated && lightLevel > baseline + 300) { //tune this numeber 
+    NoseConeSeparated = true;
+    digitalWrite(TX_CAM, HIGH); //what ever the intialization for camera is **********************
+  }
+  if (!TetherReleased && altitude > 200) { //set altitude at a height 
+    TetherReleased = true;
+    digitalWrite(SOLENOID1, HIGH);
+    unsigned long fireStart = micros();
+    while (micros() - fireStart < 1000000);
+    digitalWrite(SOLENOID1, LOW);
+  }
+  if (!ParachuteDeployed && TetherReleased && altitude < 100) { //parachute deployed at 100m atm...****?
+    ParachuteDeployed = true;
+    digitalWrite(SOLENOID2, HIGH);
+    unsigned long fireStart = micros();
+    while (micros() - fireStart < 1000000); //waiting for the ematch or co2 to be fully deployed? ********
+    digitalWrite(SOLENOID2, LOW);
+  }
+
+
+  
   
 }
+
+
+void setupCamera() {
+    delay(3000);  // Optional delay before init
+    rcSerial.begin(115200);
+    delay(3000);  // Allow time for camera to initialize
+    // Build command to toggle recording
+    txBuf[0] = 0xCC;
+    txBuf[1] = 0x01;  // Command ID
+    txBuf[2] = 0x01;  // Parameter (toggle)
+    txBuf[3] = calcCrc(txBuf, 3);
+}
+void startRecording() {
+    if (recState == 0) {
+        rcSerial.write(txBuf, 4);
+        recState = 1;
+    }
+}
+void stopRecording() {
+    if (recState == 1) {
+        rcSerial.write(txBuf, 4);
+        recState = 0;
+    }
+}
+uint8_t calcCrc(uint8_t *buf, uint8_t numBytes) {
+    uint8_t crc = 0;
+    for (uint8_t i = 0; i < numBytes; i++)
+        crc = crc8_calc(crc, *(buf + i), 0xD5);
+    return crc;
+}
+uint8_t crc8_calc(uint8_t crc, unsigned char a, uint8_t poly) {
+    crc ^= a;
+    for (int ii = 0; ii < 8; ++ii) {
+        if (crc & 0x80)
+            crc = (crc << 1) ^ poly;
+        else
+            crc = crc << 1;
+    }
+    return crc;
+}
+
+
