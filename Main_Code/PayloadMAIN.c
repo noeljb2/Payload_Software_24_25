@@ -18,8 +18,6 @@
 #include <Wire.h>
 #include <RadioLib.h>
 #include <SparkFun_u-blox_GNSS_v3.h>
-#include <MS5611.h> 
-
 #include "MS5611_NonBlocking.h"
 
 //  Ground Station Pin def
@@ -73,21 +71,54 @@ byte SIV = 0;
 
 
 //  MS5611 def w moving avg def
-MS5611 ms5611(0x77,&Wire1);
+MS5611_NonBlocking ms5611(0x77, &Wire1);
 float groundPressure = 0.0; //baseline pressure
 float groundAltitude = 0.0; 
 float altitude = 0.0 //raise warning if altitude is 0
 
 #define PRESSURE_AVG_SIZE 30
-float pressureBuffer[PRESSURE_AVG_SIZE];
+float pressureSamples[PRESSURE_AVG_SIZE] = {0};
 int pressureIndex = 0;
-bool pressureBufferFilled = false;
 volatile double pressureSum = 0.0;
 volatile double movingAverage = 0.0;
-double baselinePressure = 0.0;
 
-//  Light sensor Basline 
-float LightVoltage = 0.0;
+unsigned long lastUpdateTime = 0;
+const unsigned long UPDATE_INTERVAL = 100; // ms
+
+//  Light sensor Basline w Constants
+const float ADC_RESOLUTION = 1023.0;
+const float REF_VOLTAGE = 3.3;
+const int BUFFER_SIZE = 30;
+const int LOG_BATCH_SIZE = 100;  // Log every 100 samples
+
+float basevoltageread= 0.0;
+float Volt_Threshold= 0.0;
+bool thresholdReach = false;
+
+
+
+
+
+// Light Moving average
+float voltageBuffer[BUFFER_SIZE] = {0};
+int bufferIndex = 0;
+int bufferCount = 0;
+float voltageSum = 0;
+
+
+
+// Lift off Detection Variables
+bool liftoffDetected = false;
+float previousAltitude = 0.0;
+unsigned long previousTime = 0;
+const float LIFTOFF_THRESHOLD = 3.0; //m/s
+const float ALTITUDE_CHANGE_THRESHOLD = 2.0; //meters
+int detectionCount = 0; //for debounce
+const int REQUIRED_CONSECUTIVE_DETECTIONS = 3;
+float maxAltitude = 0.0;
+bool apogeeLogged = false;
+bool liftoffDone = false;
+
 
 
 //  Flight states 
@@ -98,11 +129,16 @@ bool TetherSeperation = false;
 bool MainParachute = false; 
 
 
+
+
+
 // Timing Variables 
 unsigned long currentMicros;
 unsigned long lastBeepTime = 0;
 unsigned long lastLoopTime = 0;
 const unsigned long loopInterval = 500000; // 500 ms change this to increase or decrease loop cycle
+
+
 
 // flag to indicate that a packet was sent
 volatile bool transmittedFlag = false;
@@ -137,12 +173,12 @@ void setup()
   pinMode(BUZ, OUTPUT);
   pinMode(CONT1, INPUT);
   pinMode(CONT2, INPUT);
-  pinMode(CURRENT_SENSE, OUTPUT);
   pinMode(LIGHT_SENSER, INPUT);
   pinMode(SOLENOID1, OUTPUT);
   pinMode(SOLENOID2, OUTPUT);
   pinMode(VOLT_Check, INPUT);
 
+  //tell run cam to stop recording **when run cam is powered it starts recording 
 
   // ----Cont Check-----
   if(!(analogRead(CONT1) >= 500)){
@@ -162,29 +198,52 @@ void setup()
   if (!ms5611.begin()) 
   {
     Serial.println("MS5611 not found or failed to initialize!");
+    errorCode1();
     while (1);
   }
-  ms5611.setOversampling(OSR_ULTRA_HIGH);
-  ms5611.read();
+
+  ms5611.setOSR(MS5611_NonBlocking::OSR_4096);  // Use highest resolution
+  ms5611.update();
+
+
+  // After ms5611.begin() and OSR set
+  float pressureTotal = 0;
+  for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
+    while (!ms5611.dataReady()) {
+      ms5611.update();
+    }
+    pressureTotal += ms5611.getPressure();
+    Serial.print("P: "); Serial.println(ms5611.getPressure());
+    delay(5);  // Give sensor time
+  }
   groundPressure = ms5611.getPressurePascal();
   groundAltitude = 44330.0 * (1.0 - pow(groundPressure / 101325.0, 0.1903));
 
+  pressureSum = 0;
+  for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
+    pressureSamples[i] = groundPressure;
+    pressureSum += pressureSamples[i];
+  }
+  movingAverage = pressureSum / PRESSURE_AVG_SIZE;
+
+
+
   // --------LoRa Initialization----
   int state = radio.begin(Lora_Frequency, LORA_BANDWIDTH, LORA_SPREADING_FACTOR, LORA_CODING_RATE, LORA_SYNC_WORD, LORA_POWER, LORA_PREAMBLE_LENGTH);
-  if (state == RADIOLIB_ERR_NONE) {
+  if (state == RADIOLIB_ERR_NONE) 
+  {
     Serial.println(F("success!"));
   } else {
     Serial.print(F("failed, code "));
     Serial.println(state);
+    errorCode1();
     while (true) { delay(10); }
   }
 
   radio.setCurrentLimit(140);
   radio.setPacketSentAction(setFlag);
 
-  for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
-    pressureSamples[i] = 0.0;
-  }
+
 
   // ----GPS Initialization------
   unsigned long gnssStart = millis();
@@ -236,15 +295,51 @@ void setup()
   delay(2000);
   beepDigit(ones);
 
-  
+  // ------SD Initialization--------
+  if (!SD.begin(BUILTIN_SDCARD)) {
+    Serial.println("SD card initialization failed!");
+    return;
+  }
+  Serial.println("SD card initialized.");
+   char filename[13];
+  for (int i = 1; i < 1000; i++) {
+    sprintf(filename, "log%03d.csv", i);
+    if (!SD.exists(filename)) {
+      logFile = SD.open(filename, FILE_WRITE);
+      if (logFile) {
+        Serial.print("Logging to: ");
+        Serial.println(filename);
+        logFile.println("Log Start");
+      } else {
+        Serial.println("Failed to create log file.");
+        errorCode1();
+      }
+      break;
+    }
+  }
   // -------light Sensor Calibration----
 
   //essentially polls light sensor data to set a baseline for the payload inside rocket
-
-
-
-
-
+  bool baslinebarfilled = false;
+  //baseline voltage read from the light sensor 
+  analogReadResolution(10);
+  while(!baslinebarfilled)
+  {
+    int rawValue = analogRead(LIGHT_SENSER);
+    float voltage = (rawValue / ADC_RESOLUTION) * REF_VOLTAGE;
+    voltageSum -= voltageBuffer[bufferIndex];
+    voltageBuffer[bufferIndex] = voltage;
+    voltageSum += voltage;
+    bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+    if (bufferCount < BUFFER_SIZE) 
+    {
+    bufferCount++;
+    }else
+    {
+      baslinebarfilled=true;
+    }
+  }
+  basevoltageread = voltageSum / bufferCount;
   
 }
 
@@ -254,36 +349,74 @@ void setup()
 
 void loop()
 {
+  ms5611.update();
   currentMicros = micros();
-
-
   if (currentMicros - lastLoopTime >= loopInterval) //sets a loop rate so this is set at 500 ms 
   {
     lastLoopTime = currentMicros;
 
-    ms5611.read();
-    float rawPressure = ms5611.getPressurePascal();
-    pressureSum -= pressureSamples[pressureIndex];
-    pressureSamples[pressureIndex] = rawPressure;
-    pressureSum += rawPressure;
-    pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE;
+    if(ms5611.dataRead())
+    {
+      float rawPressure = ms5611.getPressure();
+      pressureSum -= pressureSamples[pressureIndex];
+      pressureSamples[pressureIndex] = rawPressure;
+      pressureSum += rawPressure;
+      pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE;
 
-    movingAverage = pressureSum / PRESSURE_AVG_SIZE;
+      movingAverage = pressureSum / PRESSURE_AVG_SIZE;
 
-    altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
+      altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
+      float temp = ms5611.getTemperature();
+      if (altitude > maxAltitude)
+      {
+        maxAltitude = altitude;
+      }  
+      if (!liftoffDetected) 
+          {
+            if ((altitude - groundAltitude) > 50) 
+            {
+              detectionCount++;
+              if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) 
+              {
+                liftoffDetected = true;
+                Serial.println("Liftoff Detected!");
+                digitalWrite(SOLENOID1, HIGH);
+                if (logFile) 
+                {
+                  logFile.println("Liftoff Detected!");
+                }
+              }
+            } else 
+            {
+              detectionCount = 0; // Reset if condition not met continuously
+            }
+            previousAltitude = altitude;
+            previousTime = currentMicros;
+          }
+    }
+    if(myGNSS.getPVT())
+    {
+      latitude = myGNSS.getLatitude() / 1e7;
+      longitude = myGNSS.getLongitude() / 1e7;
+      altitude = myGNSS.getAltitudeMSL() / 1000.0; // Convert to meters
+      SIV = myGNSS.getSIV();  // Get number of satellites in view
+    }
 
-    latitude = myGNSS.getLatitude();
-    longitude = myGNSS.getLongitude();
-    gnssAltitude = myGNSS.getaltitude();  //optional? 
-    SIV = myGNSS.getSIV(); //probably optional ****
- 
-    String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
-    radio.transmit(data);
 
-    int lightLevel = analogRead(LIGHT_SENSOR);
+
+    
+      String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
+      radio.transmit(data);
+
+      int lightLevel = analogRead(LIGHT_SENSOR);
   }
 
   // ---State Machine----
+  if (!apogeeLogged && altitude < (maxAltitude - 1.0) && liftoffDetected) {
+    Serial.println("Apogee Detected!");
+    tone(BUZ, 2000, 300);
+    apogeeLogged = true;
+  }
   if (!NoseConeSeparated && lightLevel > baseline + 300) { //tune this numeber 
     NoseConeSeparated = true;
     digitalWrite(TX_CAM, HIGH); //what ever the intialization for camera is **********************

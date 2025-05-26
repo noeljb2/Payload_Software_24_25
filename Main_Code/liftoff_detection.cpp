@@ -4,7 +4,25 @@
 #include <SD.h>
 
 MS5611_NonBlocking ms5611(0x77, &Wire1);
-
+//patload Station Pin def
+#define GPS_TX 0
+#define GPS_RX 1
+#define LORA_RESET 3
+#define BUZ 5
+#define TX_CAM 7
+#define RX_CAM 8
+#define LORA_BUSY 9
+#define LORA_CS 10
+#define LORA_MISO 12
+#define LORA_MOSI 11
+#define LORA_DIO1 24
+#define CURRENT_SENSE 26
+#define LIGHT_SENSER 27
+#define SOLENOID1 23
+#define SOLENOID2 22
+#define PAYLOAD_STATE 20
+#define CONT2 15
+#define CONT1 14
 float groundPressure = 0.0; //baseline pressure
 float groundAltitude = 0.0; 
 float altitude = 0.0; //raise warning if altitude is 0
@@ -15,7 +33,8 @@ int pressureIndex = 0;
 volatile double pressureSum = 0.0;
 volatile double movingAverage = 0.0;
 
-
+unsigned long lastUpdateTime = 0;
+const unsigned long UPDATE_INTERVAL = 100; // ms
 File logFile;
 
 
@@ -29,11 +48,30 @@ int detectionCount = 0; //for debounce
 const int REQUIRED_CONSECUTIVE_DETECTIONS = 3;
 
 
+#define led 13
+//velocity variables 
+float baroVelocity = 0.0;
+float lastAltitudeForVelocity = 0.0;
+unsigned long previousBaroVelocityTime = 0;
+const unsigned long VELOCITY_INTERVAL_MICROS = 1000000; // 1 second
+
+//sample count 
+int samplesCount = 0;  // Tracks how many valid samples are in the buffer
+
+
+//appogee 
+float maxAltitude = 0.0;
+bool apogeeLogged = false;
+bool liftoffDone =false;
+
 void setup() {
   delay(3000);
 
   Serial.begin(9600);
-
+  pinMode(led,OUTPUT);
+  pinMode(BUZ, OUTPUT);
+  pinMode(SOLENOID1, OUTPUT);
+  pinMode(SOLENOID2,OUTPUT);
   if (!ms5611.begin()) {
     Serial.println("MS5611 not detected!");
     while (1);
@@ -43,10 +81,34 @@ void setup() {
   ms5611.setOSR(MS5611_NonBlocking::OSR_4096);  // Use highest resolution
   ms5611.update();
 
+
+  // After ms5611.begin() and OSR set
+  float pressureTotal = 0;
   for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
-    pressureSamples[i] = 0.0;
+    while (!ms5611.dataReady()) {
+      ms5611.update();
+    }
+    pressureTotal += ms5611.getPressure();
+    Serial.print("P: "); Serial.println(ms5611.getPressure());
+
+    delay(5);  // Give sensor time
   }
-   if (!SD.begin(BUILTIN_SDCARD)) {
+  
+  groundPressure = pressureTotal / PRESSURE_AVG_SIZE *100;
+  groundAltitude = 44330.0 * (1.0 - pow(groundPressure / 101325.0, 0.1903));
+
+  Serial.print("Ground Pressure: "); Serial.println(groundPressure);
+  Serial.print("Ground Altitude: "); Serial.println(groundAltitude);
+
+  pressureSum = 0;
+  for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
+    pressureSamples[i] = groundPressure;
+    pressureSum += pressureSamples[i];
+  }
+  movingAverage = pressureSum / PRESSURE_AVG_SIZE;
+
+
+  if (!SD.begin(BUILTIN_SDCARD)) {
     Serial.println("SD card initialization failed!");
     return;
   }
@@ -59,7 +121,7 @@ void setup() {
       if (logFile) {
         Serial.print("Logging to: ");
         Serial.println(filename);
-        logFile.println("Log Start");
+        logFile.println("Time_ms,Pressure_Pa,Temp_C,Altitude_Moving_Average");
       } else {
         Serial.println("Failed to create log file.");
       }
@@ -70,79 +132,69 @@ void setup() {
 }
 
 void loop() {
-    //start conversion
     ms5611.update();
-    unsigned long currentTime = millis();  
-    float deltaTime = (currentTime - previousTime) / 1000.0; // seconds
-    //when conversion is ready get newest data
-    if (ms5611.dataReady()) {
-        ms5611.read();
-        float rawPressure = ms5611.getPressure();
-        pressureSum -= pressureSamples[pressureIndex];
-        pressureSamples[pressureIndex] = rawPressure;
-        pressureSum += rawPressure;
-        pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE;
+    unsigned long currentTime = millis();
+    if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) {
+        lastUpdateTime = currentTime;  // Update the time for the next cycle
+        if (ms5611.dataReady()) 
+        { 
+          float rawPressure = ms5611.getPressure();
+          pressureSum -= pressureSamples[pressureIndex];
+          pressureSamples[pressureIndex] = rawPressure;
+          pressureSum += rawPressure;
+          pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE;
 
-        movingAverage = pressureSum / PRESSURE_AVG_SIZE;
+          movingAverage = pressureSum / PRESSURE_AVG_SIZE *100;
 
-        altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
-        float temp = ms5611.getTemperature();
-        float altbaro = ms5611.getAltitude();
-        if(logFile)
-        {
-        logFile.print(millis());
-        logFile.print(",");
-        logFile.print(rawPressure, 2);
-        logFile.print(",");
-        logFile.print(temp, 2);
-        logFile.print(",");
-        logFile.print(altitude, 2);
-        logFile.print(",");
-        logFile.println(altbaro, 2);
-        }
+          altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
+          float temp = ms5611.getTemperature();
+          Serial.println(altitude);
 
-    }
+          if (altitude > maxAltitude) {
+              maxAltitude = altitude;
+          }
 
+          if (logFile) {
+              logFile.print(currentTime);
+              logFile.print(",");
+              logFile.print(rawPressure, 2);
+              logFile.print(",");
+              logFile.print(temp, 2);
+              logFile.print(",");
+              logFile.println(altitude, 2);
+              logFile.flush();
+          }
 
-
-     
-
-
-    if (deltaTime > 0.0 && previousTime > 0) 
-    {
-        float ascentRate = (altitude - previousAltitude) / deltaTime;
-
-
-        if (ascentRate > LIFTOFF_THRESHOLD && (altitude - groundAltitude) > ALTITUDE_CHANGE_THRESHOLD) 
-        {
-            detectionCount++;
-            if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) 
-            {
-            liftoffDetected = true;
+          if (!liftoffDetected) 
+          {
+            if ((altitude - groundAltitude) > 50) {
+              detectionCount++;
+              if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) {
+                liftoffDetected = true;
+                Serial.println("Liftoff Detected!");
+                digitalWrite(SOLENOID1, HIGH);
+                if (logFile) {
+                  logFile.println("Liftoff Detected!");
+                }
+              }
+            } else {
+              detectionCount = 0; // Reset if condition not met continuously
             }
-        } else {
-            detectionCount = 0;
-        }
+          }
+          previousAltitude = altitude;
+          previousTime = currentTime;
+          }
     }
 
-
-
-
-
-
-
-
-
-
-    previousAltitude = altitude;
-    previousTime = currentTime;
-
-
-    if(millis()>10000 && logFile) 
-    {
-        logFile.close();
-        Serial.println("Log file closed.");
-        while(true); //stop logging
+    if (!apogeeLogged && altitude < (maxAltitude - 1.0) && liftoffDetected) {
+            Serial.println("Apogee Detected!");
+            logFile.println("Apogee:");
+            logFile.println(maxAltitude-groundAltitude);
+            digitalWrite(SOLENOID2, HIGH);
+            logFile.close();
+            tone(BUZ, 2000, 300);
+            apogeeLogged = true;
     }
-  
 }
+
+
