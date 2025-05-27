@@ -36,7 +36,7 @@ void setup() {
   for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
     pressureSamples[i] = 0.0;
   }
-   if (!SD.begin(BUILTIN_SDCARD)) {
+  if (!SD.begin(BUILTIN_SDCARD)) {
     Serial.println("SD card initialization failed!");
     return;
   }

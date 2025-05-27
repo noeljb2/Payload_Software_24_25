@@ -411,13 +411,31 @@ void loop()
       int lightLevel = analogRead(LIGHT_SENSOR);
   }
 
+  // ----LightLevel-----
+  //checking the light level on the photo resistor
+  int rawValue = analogRead(LIGHT_SENSER);
+  float voltage = (rawValue / ADC_RESOLUTION) * REF_VOLTAGE;
+
+  // Update moving average
+  voltageSum -= voltageBuffer[bufferIndex];
+  voltageBuffer[bufferIndex] = voltage;
+  voltageSum += voltage;
+  bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+  if (bufferCount < BUFFER_SIZE) bufferCount++;
+
+  float averageVoltage = voltageSum / bufferCount;
+
+
+
+
+
   // ---State Machine----
   if (!apogeeLogged && altitude < (maxAltitude - 1.0) && liftoffDetected) {
     Serial.println("Apogee Detected!");
     tone(BUZ, 2000, 300);
     apogeeLogged = true;
   }
-  if (!NoseConeSeparated && lightLevel > baseline + 300) { //tune this numeber 
+  if (!NoseConeSeparated && averageVoltage > basevoltageread + 0.5) { //tune this numeber 
     NoseConeSeparated = true;
     digitalWrite(TX_CAM, HIGH); //what ever the intialization for camera is **********************
   }
@@ -432,13 +450,9 @@ void loop()
     ParachuteDeployed = true;
     digitalWrite(SOLENOID2, HIGH);
     unsigned long fireStart = micros();
-    while (micros() - fireStart < 1000000); //waiting for the ematch or co2 to be fully deployed? ********
+    while (micros() - fireStart < 1000000); 
     digitalWrite(SOLENOID2, LOW);
-  }
-
-
-  
-  
+  } 
 }
 
 
