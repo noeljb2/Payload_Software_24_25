@@ -124,9 +124,9 @@ bool liftoffDone = false;
 //  Flight states 
 
 bool DetectAppogee = false;  
-bool DetectNoseConeSeperation = false; //based on light sensor 
-bool TetherSeperation = false;
-bool MainParachute = false; 
+bool NoseConeSeparated = false; //based on light sensor 
+bool TetherReleased = false;
+bool ParachuteDeployed = false; 
 
 
 
@@ -245,7 +245,7 @@ void setup()
 
 
 
-  // --------LoRa Initialization----
+  // --------LoRa Initialization------
   int state = radio.begin(Lora_Frequency, LORA_BANDWIDTH, LORA_SPREADING_FACTOR, LORA_CODING_RATE, LORA_SYNC_WORD, LORA_POWER, LORA_PREAMBLE_LENGTH);
   if (state == RADIOLIB_ERR_NONE) 
   {
@@ -426,8 +426,6 @@ void loop()
       String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
       radio.transmit(data);
     }
-      int lightLevel = analogRead(LIGHT_SENSOR);
-
   }
 
   // ----LightLevel-----
