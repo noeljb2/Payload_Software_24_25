@@ -146,6 +146,16 @@ volatile bool transmittedFlag = false;
 // save transmission state between loops
 volatile int transmissionState = RADIOLIB_ERR_NONE;
 
+
+// Run Cam Variables (RUNCAM SPLIT v4)
+#define BUFF_SIZE 20
+bool isCamera = true;
+uint8_t txBuf[BUFF_SIZE];
+int recState = 0;
+
+
+
+
 void setFlag(void) {
   // we sent a packet, set the flag
   transmittedFlag = true;
@@ -179,6 +189,13 @@ void setup()
   pinMode(VOLT_Check, INPUT);
 
   //tell run cam to stop recording **when run cam is powered it starts recording 
+
+  // ----Camera Setup -----
+  if(isCamera)
+  {
+    setupCamera();  //setup run cam 
+    stopRecording(); //stop run cam since on power cycle cam will start recording
+  }
 
   // ----Cont Check-----
   if(!(analogRead(CONT1) >= 500)){
@@ -399,16 +416,16 @@ void loop()
     {
       latitude = myGNSS.getLatitude() / 1e7;
       longitude = myGNSS.getLongitude() / 1e7;
-      altitude = myGNSS.getAltitudeMSL() / 1000.0; // Convert to meters
       SIV = myGNSS.getSIV();  // Get number of satellites in view
     }
 
 
-
+    if(transmittedFlag)
+    {
     
       String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
       radio.transmit(data);
-
+    }
       int lightLevel = analogRead(LIGHT_SENSOR);
 
   }
@@ -445,15 +462,15 @@ void loop()
   if (!TetherReleased && altitude > 200) { //set altitude at a height 
     TetherReleased = true;
     digitalWrite(SOLENOID1, HIGH);
-    unsigned long fireStart = micros();
+    unsigned long fireStart = micros();  //Setting of Line cutter 
     while (micros() - fireStart < 1000000);
     digitalWrite(SOLENOID1, LOW);
   }
   if (!ParachuteDeployed && TetherReleased && altitude < 100) { //parachute deployed at 100m atm...****?
     ParachuteDeployed = true;
-    digitalWrite(SOLENOID2, HIGH);
-    unsigned long fireStart = micros();
-    while (micros() - fireStart < 1000000); 
+    digitalWrite(SOLENOID2, HIGH);  //Setting off ematch 
+    unsigned long fireStart = micros();  
+    while (micros() - fireStart < 1000000);  
     digitalWrite(SOLENOID2, LOW);
   } 
 }
