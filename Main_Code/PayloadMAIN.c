@@ -333,7 +333,7 @@ void setup()
     bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
     if (bufferCount < BUFFER_SIZE) 
     {
-    bufferCount++;
+      bufferCount++;
     }else
     {
       baslinebarfilled=true;
@@ -394,6 +394,7 @@ void loop()
             previousTime = currentMicros;
           }
     }
+    // ---Getting gps data from sam 10----
     if(myGNSS.getPVT())
     {
       latitude = myGNSS.getLatitude() / 1e7;
@@ -409,6 +410,7 @@ void loop()
       radio.transmit(data);
 
       int lightLevel = analogRead(LIGHT_SENSOR);
+
   }
 
   // ----LightLevel-----
@@ -432,12 +434,13 @@ void loop()
   // ---State Machine----
   if (!apogeeLogged && altitude < (maxAltitude - 1.0) && liftoffDetected) {
     Serial.println("Apogee Detected!");
+    digitalWrite(TX_CAM,HIGH); //turn on camera at apogee 
     tone(BUZ, 2000, 300);
     apogeeLogged = true;
   }
   if (!NoseConeSeparated && averageVoltage > basevoltageread + 0.5) { //tune this numeber 
     NoseConeSeparated = true;
-    digitalWrite(TX_CAM, HIGH); //what ever the intialization for camera is **********************
+    //not sure what to put in this 
   }
   if (!TetherReleased && altitude > 200) { //set altitude at a height 
     TetherReleased = true;
