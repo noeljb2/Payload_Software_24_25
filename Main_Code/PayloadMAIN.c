@@ -84,6 +84,9 @@ volatile double movingAverage = 0.0;
 
 unsigned long lastUpdateTime = 0;
 const unsigned long UPDATE_INTERVAL = 100; // ms
+float baselinePressure = 0.0;
+
+
 
 //  Light sensor Basline w Constants
 const float ADC_RESOLUTION = 1023.0;
@@ -94,7 +97,7 @@ const int LOG_BATCH_SIZE = 100;  // Log every 100 samples
 float basevoltageread= 0.0;
 float Volt_Threshold= 0.0;
 bool thresholdReach = false;
-
+bool barBaselineSet = false;
 
 
 
@@ -366,7 +369,7 @@ void setup()
 
 void loop()
 {
-  ms5611.update();
+  ms5611.update(); 
   currentMicros = micros();
   if (currentMicros - lastLoopTime >= loopInterval) //sets a loop rate so this is set at 500 ms 
   {
@@ -384,33 +387,48 @@ void loop()
 
       altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
       float temp = ms5611.getTemperature();
+            // Set baseline after buffer fills
+      if (!barBaselineSet && pressureIndex == 0) {  
+        baselinePressure = movingAverage;
+        barBaselineSet = true;
+        Serial.println("Baseline pressure set for relative altitude calculation.");
+
+        previousAltitude = 44330.0 * (1.0 - pow(movingAverage / baselinePressure, 0.1903));
+        previousTime = micros();
+      }
+    }
+    if(barBaselineSet)
+    {
       if (altitude > maxAltitude)
       {
         maxAltitude = altitude;
       }  
-      if (!liftoffDetected) 
-          {
-            if ((altitude - groundAltitude) > 50) 
-            {
-              detectionCount++;
-              if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) 
-              {
-                liftoffDetected = true;
-                Serial.println("Liftoff Detected!");
-                digitalWrite(SOLENOID1, HIGH);
-                if (logFile) 
-                {
-                  logFile.println("Liftoff Detected!");
-                }
-              }
-            } else 
-            {
-              detectionCount = 0; // Reset if condition not met continuously
-            }
-            previousAltitude = altitude;
-            previousTime = currentMicros;
-          }
     }
+
+    // ---Checking  for if liftoff is detected---
+    if (!liftoffDetected && barBaselineSet) 
+    {
+      if ((altitude - groundAltitude) > 50) 
+      {
+        detectionCount++;
+        if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) 
+        {
+          liftoffDetected = true;
+          Serial.println("Liftoff Detected!");
+          //digitalWrite(SOLENOID1, HIGH);
+          if (logFile) 
+          {
+            logFile.println("Liftoff Detected!");
+          }
+        }
+      } else 
+      {
+        detectionCount = 0; // Reset if condition not met continuously
+      }
+      previousAltitude = altitude;
+
+    }
+
     // ---Getting gps data from sam 10----
     if(myGNSS.getPVT())
     {
@@ -419,13 +437,14 @@ void loop()
       SIV = myGNSS.getSIV();  // Get number of satellites in view
     }
 
-
+    //  --- Lora Initilization ---
     if(transmittedFlag)
     {
-    
       String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
       radio.transmit(data);
     }
+    previousAltitude = altitude;
+    previousTime = currentMicros;
   }
 
   // ----LightLevel-----

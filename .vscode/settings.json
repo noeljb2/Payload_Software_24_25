@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "gps_test": "cpp",
-        "ostream": "cpp"
+        "ostream": "cpp",
+        "cmath": "cpp"
     }
 }

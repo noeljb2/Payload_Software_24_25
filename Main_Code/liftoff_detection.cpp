@@ -49,20 +49,21 @@ const int REQUIRED_CONSECUTIVE_DETECTIONS = 3;
 
 
 #define led 13
-//velocity variables 
-float baroVelocity = 0.0;
-float lastAltitudeForVelocity = 0.0;
-unsigned long previousBaroVelocityTime = 0;
-const unsigned long VELOCITY_INTERVAL_MICROS = 1000000; // 1 second
+
 
 //sample count 
 int samplesCount = 0;  // Tracks how many valid samples are in the buffer
-
 
 //appogee 
 float maxAltitude = 0.0;
 bool apogeeLogged = false;
 bool liftoffDone =false;
+
+float rawPressure=0.0;
+float temp = 0.0;
+
+bool barBaselineSet = false;
+double baselinePressure = 0.0;
 
 void setup() {
   delay(3000);
@@ -102,10 +103,8 @@ void setup() {
 
   pressureSum = 0;
   for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
-    pressureSamples[i] = groundPressure;
-    pressureSum += pressureSamples[i];
+    pressureSamples[i] = 0;
   }
-  movingAverage = pressureSum / PRESSURE_AVG_SIZE;
 
 
   if (!SD.begin(BUILTIN_SDCARD)) {
@@ -134,11 +133,12 @@ void setup() {
 void loop() {
     ms5611.update();
     unsigned long currentTime = millis();
-    if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) {
+    if (currentTime - lastUpdateTime >= UPDATE_INTERVAL) 
+    {
         lastUpdateTime = currentTime;  // Update the time for the next cycle
         if (ms5611.dataReady()) 
         { 
-          float rawPressure = ms5611.getPressure();
+          rawPressure = ms5611.getPressure();
           pressureSum -= pressureSamples[pressureIndex];
           pressureSamples[pressureIndex] = rawPressure;
           pressureSum += rawPressure;
@@ -147,25 +147,39 @@ void loop() {
           movingAverage = pressureSum / PRESSURE_AVG_SIZE *100;
 
           altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
-          float temp = ms5611.getTemperature();
+          temp = ms5611.getTemperature();
           Serial.println(altitude);
+          
+          // Set baseline after buffer fills
+          if (!barBaselineSet && pressureIndex == 0) {  
+            baselinePressure = movingAverage;
+            barBaselineSet = true;
+            Serial.println("Baseline pressure set for relative altitude calculation.");
 
+            previousAltitude = 44330.0 * (1.0 - pow(movingAverage / baselinePressure, 0.1903));
+            previousTime = micros();
+          }
+        }
+
+        if(barBaselineSet)
+        {
           if (altitude > maxAltitude) {
-              maxAltitude = altitude;
+            maxAltitude = altitude;
           }
+        }
+        if (logFile) 
+        {
+            logFile.print(currentTime);
+            logFile.print(",");
+            logFile.print(rawPressure, 2);
+            logFile.print(",");
+            logFile.print(temp, 2);
+            logFile.print(",");
+            logFile.println(altitude, 2);
+            logFile.flush();
+        }
 
-          if (logFile) {
-              logFile.print(currentTime);
-              logFile.print(",");
-              logFile.print(rawPressure, 2);
-              logFile.print(",");
-              logFile.print(temp, 2);
-              logFile.print(",");
-              logFile.println(altitude, 2);
-              logFile.flush();
-          }
-
-          if (!liftoffDetected) 
+          if (!liftoffDetected && barBaselineSet) 
           {
             if ((altitude - groundAltitude) > 50) {
               detectionCount++;
@@ -181,10 +195,10 @@ void loop() {
               detectionCount = 0; // Reset if condition not met continuously
             }
           }
-          previousAltitude = altitude;
-          previousTime = currentTime;
-          }
+      previousAltitude = altitude;
+      previousTime = currentTime;
     }
+    
 
     if (!apogeeLogged && altitude < (maxAltitude - 1.0) && liftoffDetected) {
             Serial.println("Apogee Detected!");
@@ -195,6 +209,6 @@ void loop() {
             tone(BUZ, 2000, 300);
             apogeeLogged = true;
     }
-}
-
+  
+  }
 
