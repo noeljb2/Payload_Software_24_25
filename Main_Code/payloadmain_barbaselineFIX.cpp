@@ -20,7 +20,6 @@
 #include <SparkFun_u-blox_GNSS_v3.h>
 #include "MS5611_NonBlocking.h"
 #include <SD.h>
-#include <HardwareSerial.h>
 //  Ground Station Pin def
 #define GPS_TX 0
 #define GPS_RX 1
@@ -84,7 +83,7 @@ volatile double movingAverage = 0.0;
 
 unsigned long lastUpdateTime = 0;
 const unsigned long UPDATE_INTERVAL = 100; // ms
-float baselinePressure = 0.0;
+double baselinePressure = 0.0;
 
 float rawPressure= 0.0;
 
@@ -244,14 +243,12 @@ void setup()
     errorCode();
     while (1);
   }
-
+  
   ms5611.setOSR(MS5611_NonBlocking::OSR_4096);  // Use highest resolution
   delay(100);
   ms5611.update();
   delay(100);
 
-
-  // After ms5611.begin() and OSR set
   float pressureTotal = 0;
   for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
     while (!ms5611.dataReady()) {
@@ -261,14 +258,13 @@ void setup()
     Serial.print("P: "); Serial.println(ms5611.getPressure());
     delay(5);  // Give sensor time
   }
-  groundPressure = ms5611.getPressure()*100;
+  // After ms5611.begin() and OSR set
+  groundPressure = pressureTotal/PRESSURE_AVG_SIZE *100;
   groundAltitude = 44330.0 * (1.0 - pow(groundPressure / 101325.0, 0.1903));
-  pressureSum = 0;
-  for (int i = 0; i < PRESSURE_AVG_SIZE; i++) {
-    pressureSamples[i] = groundPressure;
-    pressureSum += pressureSamples[i];
-  }
-  movingAverage = pressureSum / PRESSURE_AVG_SIZE;
+  Serial.print("Ground Pressure: ");
+  Serial.println(groundPressure);
+  Serial.println("GroundAltitude");
+  Serial.println(groundAltitude);
 
 
 
@@ -356,7 +352,7 @@ void setup()
       if (logFile) {
         Serial.print("Logging to: ");
         Serial.println(filename);
-        logFile.println("Time(us), Altitude(m), Light, Latitude, Longitude, Flight State");
+        logFile.println("Time(us), Altitude(m), Light, Latitude, Longitude, Flight State,rawpressure");
         logFile.flush();
       } else {
         Serial.println("Failed to create log file.");
@@ -405,22 +401,18 @@ void loop()
     pressureSum += rawPressure;
     pressureIndex = (pressureIndex + 1) % PRESSURE_AVG_SIZE ;
 
-    movingAverage = pressureSum / PRESSURE_AVG_SIZE * 100;
-
-    altitude = 44330.0 * (1.0 - pow(movingAverage / 101325.0, 0.1903));
+    movingAverage = pressureSum / PRESSURE_AVG_SIZE * 100; //convert to kpascals
     // Set baseline after buffer fills
-    if (!barBaselineSet && (pressureIndex == 0)) {  
+    if (!barBaselineSet && pressureIndex == 0) {  
       baselinePressure = movingAverage;
       barBaselineSet = true;
-    }
-    if(altitude<0) //****************************************************************************REMOVE if not right this is to combat random -pressures 
-    {
-      barBaselineSet = false;
+      Serial.println("baseline pressure set for relative altitude calc");
     }
   }
   if(barBaselineSet)
   {
-    if (altitude > maxAltitude)
+    altitude = 44330.0 * (1.0 - pow(movingAverage /baselinePressure , 0.1903));
+    if (altitude > maxAltitude) 
     {
       maxAltitude = altitude;
     }  
@@ -429,7 +421,7 @@ void loop()
   // ---Checking  for if liftoff is detected---
   if (!liftoffDetected && barBaselineSet) 
   {
-    if ((altitude - groundAltitude) > 50) 
+    if ((altitude) > 50) 
     {
       detectionCount++;
       if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) 
@@ -441,9 +433,8 @@ void loop()
     {
       detectionCount = 0; // Reset if condition not met continuously
     }
-
   }
-  Serial.println("h"); //just to see if loop is not getting blocked
+  Serial.println("h");
   // ---Getting gps data from sam 10----
   if(myGNSS.getPVT())
   {
@@ -467,7 +458,7 @@ void loop()
 
   float averageVoltage = voltageSum / bufferCount;
 
-  if (logFile)   //&& liftoffDetected && !Landed
+  if (logFile && barBaselineSet)   //&& liftoffDetected && !Landed
   {
     logFile.print(millis());
     logFile.print(",");
@@ -480,6 +471,8 @@ void loop()
     logFile.print(latitude,7);
     logFile.print(",");
     logFile.print(FlightState);
+    logFile.print(",");
+    logFile.print(rawPressure);
     logFile.println();
     logFile.flush();
   }
@@ -508,7 +501,7 @@ void loop()
   {
     digitalWrite(SOLENOID1, LOW);
   }
-  if (!ParachuteDeployed && TetherReleased && (altitude-groundAltitude < 500)) { //parachute deployed at 100m atm...****?
+  if (!ParachuteDeployed && TetherReleased && (altitude< 500)) { //parachute deployed at 100m atm...****?
     ParachuteDeployed = true;
     FlightState=5; //main deploy
     digitalWrite(SOLENOID2, HIGH);  //Setting off ematch 
@@ -518,7 +511,7 @@ void loop()
   {
     digitalWrite(SOLENOID2, LOW);
   }
-  if(ParachuteDeployed && altitude-groundAltitude <= 5)
+  if(ParachuteDeployed && altitude <= 5)
   {
     Landed = true;
     FlightState = 6; //landed
@@ -534,6 +527,8 @@ void loop()
     logFile.print(latitude,7);
     logFile.print(",");
     logFile.print(FlightState);
+    logFile.print(",");
+    logFile.print(rawPressure);
     logFile.println();
     logFile.flush();
     logFile.close();

@@ -20,11 +20,14 @@
 #include <SparkFun_u-blox_GNSS_v3.h>
 #include "MS5611_NonBlocking.h"
 #include <SD.h>
+#include <HardwareSerial.h>
 //  Ground Station Pin def
 #define GPS_TX 0
 #define GPS_RX 1
 #define LORA_RESET 3
 #define BUZ 5
+#define RX_EN 34
+#define TX_EN 35
 #define TX_CAM 7
 #define RX_CAM 8
 #define VOLT_Check 25
@@ -127,7 +130,7 @@ volatile bool DetectAppogee = false;
 volatile bool NoseConeSeparated = false; //based on light sensor 
 volatile bool TetherReleased = false;
 volatile bool ParachuteDeployed = false; 
-
+volatile bool Landed = false;
 
 
 
@@ -138,6 +141,14 @@ unsigned long lastBeepTime = 0;
 unsigned long lastLoopTime = 0;
 const unsigned long loopInterval = 500000; // 500 ms change this to increase or decrease loop cycle
 
+// lora timing 
+unsigned long lastTransmition = 0.0;
+unsigned long transmitPeriod = 1000000; //1 second transmission 
+
+
+//pyro 1 and 2 timing 
+unsigned long fireStart1 = 0.0;
+unsigned long fireStart2 = 0.0;
 
 
 // flag to indicate that a packet was sent
@@ -147,7 +158,11 @@ volatile bool transmittedFlag = false;
 volatile int transmissionState = RADIOLIB_ERR_NONE;
 
 
+
+
 // Run Cam Variables (RUNCAM SPLIT v4)
+
+#define rcSerial Serial2   // for pins 7 (RX), 8 (TX)
 #define BUFF_SIZE 20
 bool isCamera = true;
 uint8_t txBuf[BUFF_SIZE];
@@ -158,7 +173,11 @@ unsigned long noseconestarttime = 0.0;
 
 
 // flight states
-String FlightState="Pad";
+int FlightState=0; //0 means pad
+
+
+
+
 
 
 void setFlag(void) {
@@ -182,9 +201,9 @@ void errorCode()
 
 void setup()
 {
+  delay(3000);
   Serial.begin(115200);
-  Wire1.begin();
-
+  
   pinMode(BUZ, OUTPUT);
   pinMode(CONT1, INPUT);
   pinMode(CONT2, INPUT);
@@ -192,7 +211,7 @@ void setup()
   pinMode(SOLENOID1, OUTPUT);
   pinMode(SOLENOID2, OUTPUT);
   pinMode(VOLT_Check, INPUT);
-
+  
   //tell run cam to stop recording **when run cam is powered it starts recording 
 
   // ----Camera Setup -----
@@ -203,7 +222,7 @@ void setup()
   }*/
 
   // ----Cont Check-----
-  if(!(analogRead(CONT1) >= 170)){
+  /*if(!(analogRead(CONT1) >= 170)){
     Serial.println(analogRead(CONT1));
     Serial.println("No cont1");
     errorCode();
@@ -212,11 +231,14 @@ void setup()
     Serial.println(analogRead(CONT2));
     Serial.println("No cont2");
     errorCode();
-  }
+  }*/
 
 
 
   // -------Baro Sensor Initialization-----
+  delay(100);
+  Wire1.begin();
+  delay(100);
   if (!ms5611.begin()) 
   {
     Serial.println("MS5611 not found or failed to initialize!");
@@ -250,8 +272,8 @@ void setup()
 
 
   // --------LoRa Initialization------
-  //int state = radio.begin(LORA_FREQ,LORA_BAND,8,5,RADIOLIB_SX126X_SYNC_WORD_PRIVATE,LORA_PdBm,8,0,false);
-  int state = radio.begin();
+  radio.setRfSwitchPins(RX_EN,TX_EN);
+  int state = radio.begin(915.0,125,8,5,RADIOLIB_SX126X_SYNC_WORD_PRIVATE,22,8,1.6,false);
   if (state == RADIOLIB_ERR_NONE) 
   {
     Serial.println(F("success!"));
@@ -261,11 +283,11 @@ void setup()
     errorCode();
     while (true) { delay(10); }
   }
-
+  
   radio.setCurrentLimit(140);
   radio.setPacketSentAction(setFlag);
-
-
+  radio.setDio1Action(setFlag);
+  
 
   // ----GPS Initialization------
   unsigned long gnssStart = millis();
@@ -412,7 +434,7 @@ void loop()
       if (detectionCount >= REQUIRED_CONSECUTIVE_DETECTIONS) 
       {
         liftoffDetected = true;
-        FlightState="LiftOff";
+        FlightState=1; //liftoff
       }
     } else 
     {
@@ -421,7 +443,7 @@ void loop()
     previousAltitude = altitude;
 
   }
-
+  Serial.println("h");
   // ---Getting gps data from sam 10----
   if(myGNSS.getPVT())
   {
@@ -430,14 +452,8 @@ void loop()
     SIV = myGNSS.getSIV();  // Get number of satellites in view
   }
 
-  //  --- Lora Initilization ---
-  if(transmittedFlag)
-  {
-    String data = String(latitude) + "," + String(longitude) + "," + String(altitude);
-    radio.transmit(data);
-  }
-  previousAltitude = altitude;
 
+  previousAltitude = altitude;
 
   // ----LightLevel-----
   //checking the light level on the photo resistor
@@ -453,17 +469,17 @@ void loop()
 
   float averageVoltage = voltageSum / bufferCount;
 
-  if (logFile && barBaselineSet) 
+  if (logFile && liftoffDetected && !Landed) 
   {
     logFile.print(millis());
     logFile.print(",");
-    logFile.print(altitude);
+    logFile.print(altitude,2);
     logFile.print(",");
-    logFile.print(averageVoltage);
+    logFile.print(averageVoltage,2);
     logFile.print(",");
-    logFile.print(longitude);
+    logFile.print(longitude,7);
     logFile.print(",");
-    logFile.print(latitude);
+    logFile.print(latitude,7);
     logFile.print(",");
     logFile.print(FlightState);
     logFile.println();
@@ -472,36 +488,84 @@ void loop()
 
 
   // ---State Machine----
+  
   if (!apogeeLogged && altitude < (maxAltitude - 5.0) && liftoffDetected) { //5 meter potential error correction
-    FlightState="ApogeeDetected";
-    //digitalWrite(TX_CAM,HIGH); //turn on camera at apogee 
+    FlightState=2; //apogeedetected
+    //startRecording();
     //tone(BUZ, 2000, 300);
     apogeeLogged = true;
   }
   if (apogeeLogged && !NoseConeSeparated && averageVoltage > basevoltageread + 0.5) { //tune this numeber 
     NoseConeSeparated = true;
-    FlightState="Nose Cone seperation";
+    FlightState=3; //nosecone seperated
     noseconestarttime = micros();
   }
   if (!TetherReleased && NoseConeSeparated && (micros()-noseconestarttime>=1000000)) { //waiting a second after nosecone is seperated
     TetherReleased = true;
-    FlightState="TetherReleased";
+    FlightState=4; //tether released
     digitalWrite(SOLENOID1, HIGH);
-    unsigned long fireStart = micros();  //Setting of Line cutter 
-    while (micros() - fireStart < 1000000);
+    fireStart1 = micros();  //Setting of Line cutter 
+  }
+  if(TetherReleased && micros() - fireStart1 >= 1000000)
+  {
     digitalWrite(SOLENOID1, LOW);
   }
   if (!ParachuteDeployed && TetherReleased && (altitude-groundAltitude < 500)) { //parachute deployed at 100m atm...****?
     ParachuteDeployed = true;
-    FlightState="MainDeployed";
+    FlightState=5; //main deploy
     digitalWrite(SOLENOID2, HIGH);  //Setting off ematch 
-    unsigned long fireStart = micros();  
-    while (micros() - fireStart < 1000000);  
-    digitalWrite(SOLENOID2, LOW);
+    fireStart2 = micros();  
   } 
+  if(ParachuteDeployed && micros() - fireStart2 >= 1000000)
+  {
+    digitalWrite(SOLENOID2, LOW);
+  }
+  if(ParachuteDeployed && altitude-groundAltitude <= 5)
+  {
+    Landed = true;
+    FlightState = 6; //landed
+    //stopRecording();  //turn off the camera
+    logFile.print(millis());
+    logFile.print(",");
+    logFile.print(altitude,2);
+    logFile.print(",");
+    logFile.print(averageVoltage,2);
+    logFile.print(",");
+    logFile.print(longitude,7);
+    logFile.print(",");
+    logFile.print(latitude,7);
+    logFile.print(",");
+    logFile.print(FlightState);
+    logFile.println();
+    logFile.flush();
+    logFile.close();
+  }
+
+    //  --- Lora Transmission ---
+  if ((micros() - lastTransmition >= transmitPeriod) && !transmittedFlag) 
+  {
+    lastTransmition = micros();
+    String data = String(latitude) + "," + String(longitude) + "," + String(altitude) + "," + String(FlightState);
+    transmissionState=radio.startTransmit(data.c_str());
+  }
+
+  if(transmittedFlag) {
+    // reset flag
+    transmittedFlag = false;
+    radio.finishTransmit();
+    if (transmissionState == RADIOLIB_ERR_NONE) {
+      // packet was successfully sent
+      Serial.println(F("transmission finished!"));
+    } else {
+      Serial.print(F("failed, code "));
+      Serial.println(transmissionState);
+    }
+    
+  }
 }
 
-/*
+
+
 void setupCamera() {
     delay(3000);  // Optional delay before init
     rcSerial.begin(115200);
@@ -541,4 +605,4 @@ uint8_t crc8_calc(uint8_t crc, unsigned char a, uint8_t poly) {
     return crc;
 }
 
-*/
+
