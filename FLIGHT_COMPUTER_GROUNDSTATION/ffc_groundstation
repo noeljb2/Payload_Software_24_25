@@ -1,0 +1,196 @@
+/Code for Receiving GPS and displaying on OLED Screen
+#include <RadioLib.h>
+#include <Wire.h>
+#include <LCD_I2C.h>
+#include <SD.h>
+//Ground Station Pins
+#define Record 9
+#define VoltCheck 16
+#define LoRaDIO1 23
+#define LoRa_BUSY 18
+#define LoRa_RST 17
+#define LoRa_CS 37
+#define RX_EN 0
+#define TX_EN 1
+File logFile;
+SX1262 radio = new Module(LoRa_CS, LoRaDIO1, LoRa_RST, LoRa_BUSY);
+extern TwoWire Wire2;
+LCD_I2C lcd(Wire2, 0x27, 16, 2);
+// flag to indicate that a packet was received
+volatile bool receivedFlag = false;
+// save transmission states between loops
+int transmissionState = RADIOLIB_ERR_NONE;
+void setFlag(void) {
+  // we got a packet, set the flag
+  receivedFlag = true;
+}
+void setup()
+{
+  Serial.begin(9600);
+  delay(1000);
+  lcd.begin(); //make it blank if problems
+  lcd.backlight();
+  // ------SD Initialization--------
+  if (!SD.begin(BUILTIN_SDCARD)) {
+    Serial.println("SD card initialization failed!");
+    return;
+  }
+  Serial.println("SD card initialized.");
+   char filename[13];
+  for (int i = 1; i < 1000; i++) {
+    sprintf(filename, "log%03d.csv", i);
+    if (!SD.exists(filename)) {
+      logFile = SD.open(filename, FILE_WRITE);
+      if (logFile) {
+        Serial.print("Logging to: ");
+        Serial.println(filename);
+        logFile.println("Time(us),packetNum, Altitude(m), Latitude, Longitude, Flight State, SIV,batteryVoltage");
+        logFile.flush();
+      } else {
+        Serial.println("Failed to create log file.");
+      }
+      break;
+    }
+  }
+  radio.setPacketReceivedAction(setFlag);
+  // initialize SX1262 with default settings
+  Serial.print(F("[SX1262] Initializing ... "));
+  int state = radio.begin(915.0,125,8,5,RADIOLIB_SX126X_SYNC_WORD_PRIVATE,22,8,1.6,false);
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println(F("success!"));
+  } else {
+    Serial.print(F("failed, code "));
+    Serial.println(state);
+    while (true) { delay(10); }
+  }
+  radio.setDio1Action(setFlag);
+  radio.setRfSwitchPins(RX_EN, TX_EN);
+  radio.startReceive();
+  Serial.println("Waiting for GPS Signal...");
+  lcd.clear();
+  lcd.print("Waiting for GPS");
+}
+void loop()
+{
+  if(receivedFlag)
+  {
+    // reset flag
+    receivedFlag = false;
+    String str;
+    int state = radio.readData(str);
+    if (state == RADIOLIB_ERR_NONE)
+    {
+      Serial.println(F("[SX1262] Received packet!"));
+      Serial.print(F("[SX1262] Data:\t\t"));
+      Serial.println(str);
+      int packetNum, SIV, FlightState;
+      float latitude = 0.0, longitude = 0.0, altitude = 0.0, batteryVoltage = 0.0;
+      if (parseGPS(str, packetNum, latitude, longitude, SIV, altitude, FlightState, batteryVoltage)) {
+        Serial.print(F("Longitude: "));
+        Serial.println(longitude, 7);
+        Serial.print(F("Latitude: "));
+        Serial.println(latitude, 7);
+        Serial.print(F("altitude: "));
+        Serial.println(altitude, 7);
+        Serial.print(F("FlightState: "));
+        switch (FlightState)
+        {
+          case 1:
+          Serial.println("Pad");
+          break;
+          case 2:
+          Serial.println("Liftoff");
+          break;
+          case 3:
+          Serial.println("Burnout");
+          break;
+          case 4:
+          Serial.println("Drogue Deployed");
+          break;
+          case 5:
+          Serial.println("Main Deployed");
+          break;
+          case 6:
+          Serial.println("Landing");
+          break;
+          default:
+          Serial.println("error No Flightstate");
+        }
+        if(logFile)
+        {
+          logFile.print(micros()); logFile.print(",");
+          logFile.print(packetNum); logFile.print(",");
+          logFile.print(altitude, 2); logFile.print(",");
+          logFile.print((float)latitude / 1e7, 7); logFile.print(",");
+          logFile.print((float)longitude / 1e7, 7); logFile.print(",");
+          logFile.print(FlightState); logFile.print(",");
+          logFile.print(SIV); logFile.print(",");
+          logFile.println(batteryVoltage, 2);
+          logFile.flush();
+        }
+      }
+      else
+      {
+        Serial.println("GPS Parse Error!");
+      }
+          // --- LCD Display ---
+     /* lcd.clear();
+      // First row: show abbreviated Lat/Lon
+      lcd.setCursor(0, 0);
+      lcd.print((int)latitude);  // limit to 2 decimal places
+      lcd.print(SIV);
+      lcd.print(abs(altitude));
+      // Second row: either Lon + FlightState (abbreviated)
+      lcd.setCursor(0, 1);
+      lcd.print((int)longitude);
+      lcd.print(batteryVoltage*100);
+      lcd.print(FlightState);
+      lcd.print(packetNum);
+      lcd.clear();
+    */
+    // Line 1: Longitude (10), SIV (2), Altitude (4)
+    lcd.setCursor(0, 0);
+    char line1[17]; // 16 chars + null terminator
+    snprintf(line1, sizeof(line1), "%10ld%02d%04d",
+            (long)longitude, SIV, (int)abs(altitude));
+    lcd.print(line1);
+    // Line 2: Latitude (10), Battery*100 (3), FlightState (1), PacketNum % 100 (2)
+    lcd.setCursor(0, 1);
+    char line2[17];
+    snprintf(line2, sizeof(line2), "%10ld%03d%d%02d",
+            (long)latitude,
+            (int)(batteryVoltage * 100),
+            FlightState,
+            packetNum % 100);
+    lcd.print(line2);
+      // Print RSSI & SNR
+      Serial.print(F("[SX1262] RSSI:\t\t"));
+      Serial.print(radio.getRSSI());
+      Serial.println(F(" dBm"));
+      Serial.print(F("[SX1262] SNR:\t\t"));
+      Serial.print(radio.getSNR());
+      Serial.println(F(" dB"));
+    }
+    else
+    {
+      Serial.println("Error receiving data");
+    }
+  }
+}
+bool parseGPS(String data, int &packetNum, float &latitude, float &longitude, int &SIV, float &altitude, int &FlightState, float &batteryVoltage) {
+  int c1 = data.indexOf(',');
+  int c2 = data.indexOf(',', c1 + 1);
+  int c3 = data.indexOf(',', c2 + 1);
+  int c4 = data.indexOf(',', c3 + 1);
+  int c5 = data.indexOf(',', c4 + 1);
+  int c6 = data.indexOf(',', c5 + 1);
+  if (c1 == -1 || c6 == -1) return false;
+  packetNum       = data.substring(0, c1).toInt();
+  latitude        = data.substring(c1 + 1, c2).toInt();
+  longitude       = data.substring(c2 + 1, c3).toInt();
+  SIV             = data.substring(c3 + 1, c4).toInt();
+  altitude        = data.substring(c4 + 1, c5).toFloat();
+  FlightState     = data.substring(c5 + 1, c6).toInt();
+  batteryVoltage  = data.substring(c6 + 1).toFloat();
+  return true;
+}
